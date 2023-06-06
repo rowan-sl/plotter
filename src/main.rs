@@ -16,7 +16,7 @@ fn main() {
         }
     }
 
-    let path = "bitmap.svg";
+    let path = "nixos.svg";
     let mut content = String::new();
     'main: for event in svg::open(path, &mut content).unwrap() {
         match event {
@@ -27,12 +27,20 @@ fn main() {
                 for (command, is_first_command) in data.iter().zip(once(true).chain(repeat(false))) {
                     println!("  cmd: {command:?}");
                     match command {
-                        &Command::Move(mut pos, ref params) => {
-                            if is_first_command {
-                                pos = Position::Absolute;
+                        &Command::Move(pos, ref params) => {
+                            let mut params = Vec2::many_from_params(params);
+                            let to = params.remove(0);
+                            mpos(&mut cpos, if is_first_command { Position::Absolute } else { pos }, to);
+                            // here we treat the rest of params as the `lineto` command.
+                            for to in params {
+                                if out.last_point() != Some(&cpos) {
+                                    // if we are drawing a line not from where we left off, add bolth
+                                    // the start and end points
+                                    out.add_point(cpos);
+                                }
+                                mpos(&mut cpos, pos, to);
+                                out.add_point(cpos);
                             }
-                            let to = Vec2::one_from_params(params);
-                            mpos(&mut cpos, pos, to);
                         }
                         &Command::Line(pos, ref params) => {
                             for to in Vec2::many_from_params(params) {
@@ -81,20 +89,23 @@ fn main() {
                             if let Some(p) = out.first_point() {
                                 out.add_point(*p);
                             }
-                            cpos = *out.last_point().unwrap();
+                            if let Some(p) = out.last_point() {
+                                cpos = *p;
+                            }
                             out.new_line();
                             // feels like this should not be necessary, maybe look into spec?
                             //cpos = Vec2::splat(0.0);
                         }
                         &Command::QuadraticCurve(pos, ref params) => {
+                            assert_eq!(pos, Position::Relative, "QuadraticCurve currently does not handle absolute positioning");
                             let mut points = Vec2::many_from_params(params);
                             // the start of the curve is the last point.
                             // we do not need to add it to the list.
-                            let mut start = cpos + Vec2::splat(0.0);
+                            let mut start = cpos;
                             let mut control = start + points.remove(0);
                             let mut end = start + points.remove(0);
                             dbg!((start, control, end));
-                            for t in (0..10).map(|i| i as f64 / 10.0) {
+                            for t in (0..=10).map(|i| i as f64 / 10.0) {
                                 out.add_point(quadratic_bezier(t, start, control, end));
                             }
                             for pair in points.chunks(2) {
@@ -102,7 +113,7 @@ fn main() {
                                 control = start + pair[0];
                                 end = start + pair[1];
                                 assert_eq!(pair.len(), 2);
-                                for t in (0..10).map(|i| i as f64 / 10.0) {
+                                for t in (0..=10).map(|i| i as f64 / 10.0) {
                                     out.add_point(quadratic_bezier(t, start, control, end));
                                 }
                             }
