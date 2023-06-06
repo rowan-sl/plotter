@@ -2,13 +2,45 @@ use std::iter::{repeat, once};
 use std::ops::{Add, AddAssign, Div, Mul, Rem, Sub};
 
 use svg::node::element::path::{Command, Data, Parameters, Position};
-use svg::node::element::tag::Path as PATH;
+use svg::node::element::tag::{self, Type};
 use svg::parser::Event;
 
 fn main() {
     let mut out = OutputLines::new();
     out.new_line();
-    let mut cpos: Vec2 = Vec2::splat(0.0); //svg b like that
+    let mut cpos = Vec2::splat(0.0); //svg b like that
+    let mut transforms: Vec<Transform> = vec![Transform::None];
+    fn lineto(params: Vec<Vec2>, pos: Position, out: &mut OutputLines, cpos: &mut Vec2, transforms: &[Transform]) {
+        // allways add the final point. this could lead to overlapping points,
+        // but nothing else really. (avoids an issue with transforms)
+        if !params.is_empty() {
+            out.add_point(*cpos, combine(&transforms))
+        }
+        for to in params {
+            // replaced with params.is_empty() code above
+            // if out.last_point() != Some(&cpos) {
+            //     // if we are drawing a line not from where we left off, add bolth
+            //     // the start and end points
+            //     out.add_point(cpos);
+            // }
+            mpos(cpos, pos, to);
+            out.add_point(*cpos, combine(&transforms));
+        }
+    }
+    fn combine(transforms: &[Transform]) -> Transform {
+        let mut final_pos = Vec2::splat(0.0);
+        for tr in transforms {
+            match tr {
+                Transform::None => {}
+                Transform::Translate(by) => final_pos += *by,
+            }
+        }
+        if final_pos != Vec2::splat(0.0) {
+            Transform::Translate(final_pos)
+        } else {
+            Transform::None
+        }
+    }
     fn mpos(cpos: &mut Vec2, method: Position, by: Vec2) {
         match method {
             Position::Relative => *cpos += by,
@@ -16,11 +48,30 @@ fn main() {
         }
     }
 
-    let path = "nixos.svg";
+    let path = "bitmap2.svg";
     let mut content = String::new();
     'main: for event in svg::open(path, &mut content).unwrap() {
         match event {
-            Event::Tag(PATH, ty, attributes) => {
+            Event::Tag(tag::Group, Type::Start, attributes) => {
+                if let Some(transform) = attributes.get("transform") {
+                    let (ty, rest) = transform.split_once("(").unwrap();
+                    match ty {
+                        "translate" => {
+                            let (n1, rest) = rest.split_once(",").unwrap();
+                            let (n2, _) = rest.split_once(")").unwrap();
+                            let (n1, n2) = (n1.parse().unwrap(), n2.parse().unwrap());
+                            transforms.push(Transform::Translate(Vec2 { x: n1, y: n2 }))
+                        }
+                        other => panic!("unknown transform {other:?}")
+                    }
+                } else {
+                    transforms.push(Transform::None)
+                }
+            }
+            Event::Tag(tag::Group, Type::End, attributes) => {
+                transforms.pop();
+            }
+            Event::Tag(tag::Path, ty, attributes) => {
                 println!("tag {ty:?}");
                 let data = attributes.get("d").unwrap();
                 let data = Data::parse(data).unwrap();
@@ -32,26 +83,23 @@ fn main() {
                             let to = params.remove(0);
                             mpos(&mut cpos, if is_first_command { Position::Absolute } else { pos }, to);
                             // here we treat the rest of params as the `lineto` command.
-                            for to in params {
-                                if out.last_point() != Some(&cpos) {
-                                    // if we are drawing a line not from where we left off, add bolth
-                                    // the start and end points
-                                    out.add_point(cpos);
-                                }
-                                mpos(&mut cpos, pos, to);
-                                out.add_point(cpos);
-                            }
+
+                            lineto(
+                                params,
+                                pos,
+                                &mut out,
+                                &mut cpos,
+                                &transforms
+                            );
                         }
                         &Command::Line(pos, ref params) => {
-                            for to in Vec2::many_from_params(params) {
-                                if out.last_point() != Some(&cpos) {
-                                    // if we are drawing a line not from where we left off, add bolth
-                                    // the start and end points
-                                    out.add_point(cpos);
-                                }
-                                mpos(&mut cpos, pos, to);
-                                out.add_point(cpos);
-                            }
+                            lineto(
+                                Vec2::many_from_params(params),
+                                pos,
+                                &mut out,
+                                &mut cpos,
+                                &transforms
+                            );
                         }
                         &Command::HorizontalLine(pos, ref params) => {
                             let to = Vec2 {
@@ -61,13 +109,13 @@ fn main() {
                                     Position::Absolute => cpos.y,
                                 }
                             };
-                            if out.last_point() != Some(&cpos) {
-                                // if we are drawing a line not from where we left off, add bolth
-                                // the start and end points
-                                out.add_point(cpos);
-                            }
-                            mpos(&mut cpos, pos, to);
-                            out.add_point(cpos);
+                            lineto(
+                                vec![to],
+                                pos,
+                                &mut out,
+                                &mut cpos,
+                                &transforms
+                            );
                         }
                         &Command::VerticalLine(pos, ref params) => {
                             let to = Vec2 {
@@ -77,44 +125,66 @@ fn main() {
                                 },
                                 y: params[0].into()
                             };
-                            if out.last_point() != Some(&cpos) {
-                                // if we are drawing a line not from where we left off, add bolth
-                                // the start and end points
-                                out.add_point(cpos);
-                            }
-                            mpos(&mut cpos, pos, to);
-                            out.add_point(cpos);
+                            lineto(
+                                vec![to],
+                                pos,
+                                &mut out,
+                                &mut cpos,
+                                &transforms
+                            );
                         }
                         &Command::Close => {
                             if let Some(p) = out.first_point() {
-                                out.add_point(*p);
+                                assert_eq!(p.1, combine(&transforms), "the transform at the start and end of a single path should be the same");
+                                out.add_point(p.0, p.1);
                             }
                             if let Some(p) = out.last_point() {
-                                cpos = *p;
+                                // transform between first and last is the same, as verified in the
+                                // last if statement
+                                cpos = p.0;
                             }
                             out.new_line();
                             // feels like this should not be necessary, maybe look into spec?
                             //cpos = Vec2::splat(0.0);
                         }
                         &Command::QuadraticCurve(pos, ref params) => {
-                            assert_eq!(pos, Position::Relative, "QuadraticCurve currently does not handle absolute positioning");
-                            let mut points = Vec2::many_from_params(params);
+                            let points = Vec2::many_from_params(params);
+                            let comp_rel = |current| if pos == Position::Relative { current } else { Vec2::splat(0.0) };
                             // the start of the curve is the last point.
                             // we do not need to add it to the list.
-                            let mut start = cpos;
-                            let mut control = start + points.remove(0);
-                            let mut end = start + points.remove(0);
-                            dbg!((start, control, end));
-                            for t in (0..=10).map(|i| i as f64 / 10.0) {
-                                out.add_point(quadratic_bezier(t, start, control, end));
-                            }
+                            let mut start;
+                            let mut control;
+                            let mut end = cpos;
+
                             for pair in points.chunks(2) {
-                                start = end;
-                                control = start + pair[0];
-                                end = start + pair[1];
                                 assert_eq!(pair.len(), 2);
+                                start = end;
+                                control = comp_rel(start) + pair[0];
+                                end = comp_rel(start) + pair[1];
                                 for t in (0..=10).map(|i| i as f64 / 10.0) {
-                                    out.add_point(quadratic_bezier(t, start, control, end));
+                                    out.add_point(quadratic_bezier(t, start, control, end), combine(&transforms));
+                                }
+                            }
+                            cpos = end;
+                        }
+                        &Command::CubicCurve(pos, ref params) => {
+                            let points = Vec2::many_from_params(params);
+                            let comp_rel = |current| if pos == Position::Relative { current } else { Vec2::splat(0.0) };
+                            // the start of the curve is the last point.
+                            // we do not need to add it to the list.
+                            let mut start;
+                            let mut control_a;
+                            let mut control_b;
+                            let mut end = cpos;
+
+                            for pair in points.chunks(3) {
+                                assert_eq!(pair.len(), 3);
+                                start = end;
+                                control_a = comp_rel(start) + pair[0];
+                                control_b = comp_rel(start) + pair[1];
+                                end = comp_rel(start) + pair[2];
+                                for t in (0..=10).map(|i| i as f64 / 10.0) {
+                                    out.add_point(cubic_bezier(t, start, control_a, control_b, end), combine(&transforms));
                                 }
                             }
                             cpos = end;
@@ -134,11 +204,15 @@ fn main() {
     for line in out.lines {
         print!("[");
         let mut first = true;
-        for point in line {
+        for (mut point, transform) in line {
             if !first {
                 print!(",");
             } else {
                 first = false;
+            }
+            match transform {
+                Transform::Translate(by) => point += by,
+                Transform::None => {}
             }
             print!("({},{})", point.x, -point.y);
         }
@@ -146,10 +220,17 @@ fn main() {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum Transform {
+    #[default]
+    None,
+    Translate(Vec2)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct OutputLines {
     // List of line< Line < =Points making the line > >
-    pub lines: Vec<Vec<Vec2>>,
+    pub lines: Vec<Vec<(Vec2, Transform)>>,
 }
 
 impl OutputLines {
@@ -162,21 +243,21 @@ impl OutputLines {
         self.lines.push(vec![]);
     }
 
-    pub fn add_point(&mut self, point: Vec2) {
+    pub fn add_point(&mut self, point: Vec2, transform: Transform) {
         self.lines
             .last_mut()
             .expect("add_point must be called after a line is created")
-            .push(point);
+            .push((point, transform));
     }
 
-    pub fn last_point(&self) -> Option<&Vec2> {
+    pub fn last_point(&self) -> Option<&(Vec2, Transform)> {
         self.lines
             .last()
             .expect("no lines present")
             .last()
     }
 
-    pub fn first_point(&self) -> Option<&Vec2> {
+    pub fn first_point(&self) -> Option<&(Vec2, Transform)> {
         self.lines
             .last()
             .expect("no lines present")
@@ -272,3 +353,11 @@ pub fn quadratic_bezier(t: f64, start: Vec2, control: Vec2, end: Vec2) -> Vec2 {
     //start * (1.0 - t).powi(2) + control * 2.0 * (1.0 - t) * t + end * t.powi(2)
     Vec2 { x, y }
 }
+
+pub fn cubic_bezier(t: f64, start: Vec2, control_a: Vec2, control_b: Vec2, end: Vec2) -> Vec2 {
+    assert!(t >= 0.0 && t <= 1.0);
+    let x = start.x*(1.0-t)*(1.0-t)*(1.0-t) + control_a.x*3.0*(1.0-t)*(1.0-t)*t + control_b.x*3.0*(1.0-t)*t*t + end.x*t*t*t;
+    let y = start.y*(1.0-t)*(1.0-t)*(1.0-t) + control_a.y*3.0*(1.0-t)*(1.0-t)*t + control_b.y*3.0*(1.0-t)*t*t + end.y*t*t*t;
+    Vec2 { x, y }
+}
+
